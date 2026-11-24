@@ -1,0 +1,1248 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>リズム改札</title>
+<style>
+  :root { --ink: #1c1b19; --muted: #8b877f; --paper: #fff; --a: #b5392b; --b: #27496d; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--paper); color: var(--ink); }
+  body { font: 13px/1.35 ui-monospace, "Cascadia Mono", Consolas, Menlo, "Hiragino Sans", "Noto Sans JP", monospace; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  canvas { display: block; image-rendering: pixelated; touch-action: none; cursor: pointer; outline: none; }
+  .hud { position: fixed; left: max(16px, env(safe-area-inset-left)); right: max(16px, env(safe-area-inset-right)); display: flex; justify-content: space-between; gap: 16px; pointer-events: none; }
+  #scores { position: fixed; top: max(14px, env(safe-area-inset-top)); left: max(16px, env(safe-area-inset-left)); display: grid; gap: 2px; pointer-events: none; }
+  #bottom { bottom: max(14px, env(safe-area-inset-bottom)); align-items: flex-end; }
+  .row { display: flex; align-items: baseline; gap: 8px; }
+  .row b { font-size: 16px; font-weight: 600; min-width: 2ch; font-variant-numeric: tabular-nums; }
+  #blasted { color: var(--a); } #combo { color: var(--b); }
+  #status { color: var(--muted); }
+  #status.hot { color: var(--ink); font-weight: 600; }
+  button { pointer-events: auto; font: inherit; color: var(--muted); background: none; border: 0; padding: 10px; margin: -10px; cursor: pointer; }
+  button:hover, button:focus-visible { color: var(--ink); }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c" tabindex="0" aria-label="駅の改札。ピン・ポーンと鳴ったニセきっぷの客を、次の拍でタップかスペースでぶっ飛ばす。"></canvas></div>
+<div id="scores">
+  <div class="row" id="blasted"><span>点数</span><b id="s0">0</b></div>
+  <div class="row" id="combo"><span>コンボ</span><b id="s1">0</b></div>
+</div>
+<div class="hud" id="bottom">
+  <div id="status" role="status" aria-live="polite"></div>
+  <button id="mute" type="button" aria-pressed="false">sound on</button>
+</div>
+<script>
+/* pixel-plays の shell.js と engine.js を、このファイルの中に入れています（MIT ライセンス）
+MIT License
+
+Copyright (c) 2026 Amir Mushich
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+'use strict';
+// Shared chrome for every game: game menu (top centre) and rules popup (top right).
+window.PixelPlays = (() => {
+  // add a game here and give it a folder; `soon` entries show in the menu but do not link
+  const GAMES = [
+    { id: 'rhythm-gate', title: 'リズム改札' },
+  ];
+  const MUSIC_VOLUME = .4;
+  const CREDITS = [
+    ['Engine: pixel-plays by', 'AmirMushich', 'https://github.com/amirmushichge/pixel-plays'],
+    ['Concept by', 'abhi', 'https://x.com/awwbhi2'],
+  ];
+  const css = `
+    .pp-link { font: inherit; color: #8b877f; background: none; border: 0; padding: 10px; margin: 0; cursor: pointer; }
+    .pp-link:hover, .pp-link:focus-visible, .pp-link[aria-expanded="true"] { color: #1c1b19; }
+    #pp-menu { position: fixed; top: max(4px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 5; text-align: center; }
+    #pp-list { list-style: none; margin: 0; padding: 4px 0; background: #fff; border: 1px solid #1c1b19; min-width: 150px; text-align: left; }
+    #pp-list[hidden] { display: none; }
+    #pp-list a, #pp-list span { display: flex; justify-content: space-between; gap: 16px; padding: 8px 12px; color: #1c1b19; text-decoration: none; }
+    #pp-list a:hover, #pp-list a:focus-visible { background: #1c1b19; color: #fff; outline: none; }
+    #pp-list a[aria-current="page"]::after { content: "•"; }
+    #pp-list span { color: #b3afa7; }
+    #pp-rules-open { position: fixed; top: max(4px, env(safe-area-inset-top)); right: max(6px, env(safe-area-inset-right)); z-index: 5; }
+    #pp-rules { width: min(340px, calc(100vw - 32px)); padding: 16px; border: 1px solid #1c1b19; color: #1c1b19; background: #fff; font: inherit; }
+    #pp-rules::backdrop { background: rgba(255, 255, 255, .72); }
+    #pp-rules h2 { margin: 0 0 10px; font: inherit; font-weight: 600; }
+    #pp-rules ol { margin: 0 0 8px; padding-left: 18px; }
+    #pp-rules li { margin-bottom: 8px; }
+    #pp-rules form { text-align: right; }
+    #pp-rules .pp-link { margin: 0 -10px -10px; color: #1c1b19; }
+    #pp-credits { position: fixed; bottom: max(14px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); z-index: 4; display: flex; gap: 16px; color: #8b877f; white-space: nowrap; pointer-events: none; }
+    #pp-credits a { color: inherit; text-decoration: underline; text-underline-offset: 2px; pointer-events: auto; }
+    #pp-credits a:hover, #pp-credits a:focus-visible { color: #1c1b19; }
+    /* long end-of-game status lines run towards the centre, so the credits step above them */
+    @media (max-width: 1200px) { #pp-credits { bottom: max(38px, calc(env(safe-area-inset-bottom) + 24px)); } }
+    @media (max-width: 600px) { #pp-credits { bottom: max(72px, calc(env(safe-area-inset-bottom) + 58px)); } }
+  `;
+  function mount({ id, rules }) {
+    const game = GAMES.find(g => g.id === id);
+    const style = document.createElement('style');
+    style.textContent = css;
+    document.head.append(style);
+
+    const menu = document.createElement('nav');
+    menu.id = 'pp-menu';
+    menu.setAttribute('aria-label', 'Games');
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'pp-link';
+    toggle.textContent = game.title + ' ▾';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', 'pp-list');
+    const list = document.createElement('ul');
+    list.id = 'pp-list';
+    list.hidden = true;
+    for (const g of GAMES) {
+      const item = document.createElement('li');
+      if (g.soon) {
+        const label = document.createElement('span');
+        label.innerHTML = '<span style="padding:0">' + g.title + '</span><span style="padding:0">soon</span>';
+        item.append(label);
+      } else {
+        const link = document.createElement('a');
+        link.href = '../' + g.id + '/index.html';
+        link.textContent = g.title;
+        if (g.id === id) link.setAttribute('aria-current', 'page');
+        item.append(link);
+      }
+      list.append(item);
+    }
+    menu.append(toggle, list);
+    const setOpen = open => {
+      list.hidden = !open;
+      toggle.setAttribute('aria-expanded', String(open));
+    };
+    toggle.addEventListener('click', () => setOpen(list.hidden));
+    document.addEventListener('pointerdown', e => { if (!menu.contains(e.target)) setOpen(false); });
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && !list.hidden) { setOpen(false); toggle.focus(); }
+    });
+
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.id = 'pp-rules-open';
+    open.className = 'pp-link';
+    open.textContent = 'Rules';
+    const dialog = document.createElement('dialog');
+    dialog.id = 'pp-rules';
+    dialog.setAttribute('aria-labelledby', 'pp-rules-title');
+    const title = document.createElement('h2');
+    title.id = 'pp-rules-title';
+    title.textContent = game.title;
+    const steps = document.createElement('ol');
+    for (const rule of rules) {
+      const li = document.createElement('li');
+      li.textContent = rule;
+      steps.append(li);
+    }
+    const form = document.createElement('form');
+    form.method = 'dialog';
+    form.innerHTML = '<button class="pp-link">Close</button>';
+    dialog.append(title, steps, form);
+    open.addEventListener('click', () => dialog.showModal());
+    dialog.addEventListener('click', e => { if (e.target === dialog) dialog.close(); });
+
+    const credits = document.createElement('div');
+    credits.id = 'pp-credits';
+    for (const [label, name, url] of CREDITS) {
+      const line = document.createElement('span');
+      const link = document.createElement('a');
+      link.href = url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.textContent = name;
+      line.append(label + ' ', link);
+      credits.append(line);
+    }
+
+    document.body.append(menu, open, dialog, credits);
+    // 紹介ページ版：BGM の mp3 は同梱していないので読みこまない（音はゲーム側で合成）
+  }
+  // each game loops <id>/<id>.mp3 from the first gesture, because browsers block sound before one.
+  // The game's own sound button mutes it too.
+  function startMusic(id) {
+    const music = new Audio(id + '.mp3');
+    music.loop = true;
+    music.volume = MUSIC_VOLUME;
+    music.preload = 'none';
+    let started = false;
+    const start = () => {
+      started = true;
+      music.play().catch(() => { started = false; });
+    };
+    for (const kind of ['pointerdown', 'keydown']) document.addEventListener(kind, () => { if (!started) start(); });
+    document.getElementById('mute').addEventListener('click', () => { music.muted = !music.muted; });
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) music.pause();
+      else if (started) start();
+    });
+    PixelPlays.music = music;
+  }
+  return { mount, GAMES };
+})();
+</script>
+<script>
+PixelPlays.mount({
+  id: 'rhythm-gate',
+  rules: [
+    'ふつうのお客さんは そのまま通ります。なにもしなくてOK。',
+    '「ピン・ポーン♪」と鳴って 改札が赤くなったら ニセきっぷの客。',
+    '次の拍で タップ・クリック・スペース。パンチで 空のかなたへ（+100点、ぴったりなら +150点）。',
+    '早すぎると すぐ逃げられます。ふつうのお客さんを叩くと 怒られて −100点。',
+    '約34秒。だんだん混んできます。',
+    'ときどき となりの線路を 電車が通ります（ゲームには関係ありません）。',
+  ],
+});
+</script>
+<script>window.PP_SCENE = { originY: 32, shadowX: 1.1, shadowY: -.35 };</script>
+<script>
+'use strict';
+// Shared pixel renderer for every game: orthographic camera, depth buffer, ramps, shadows, edges and wind.
+// A game sets window.PP_SCENE before loading this file, then draws through these globals.
+const SCENE = window.PP_SCENE || {};
+const W = 360, H = 280, S = 10;
+const SIN = 0.5, COS = Math.sqrt(3) / 2, R2 = Math.SQRT2;
+const OX = W / 2, OY = H / 2 + (SCENE.originY || 0);
+const SHADOW_X = SCENE.shadowX == null ? 1.3 : SCENE.shadowX, SHADOW_Y = SCENE.shadowY == null ? -.12 : SCENE.shadowY;
+const canvas = document.getElementById('c');
+canvas.width = W; canvas.height = H;
+const ctx = canvas.getContext('2d');
+const image = ctx.createImageData(W, H);
+const pix = new Uint32Array(image.data.buffer);
+const zb = new Float32Array(W * H);
+const bakedPix = new Uint32Array(W * H);
+const bakedZ = new Float32Array(W * H);
+const ground = new Uint8Array(W * H);
+const shadowMask = new Uint8Array(W * H);
+const groundZ = new Float32Array(W * H);
+const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + .5) / 16);
+const COOL = [46, 38, 84], WARM = [255, 232, 180];
+const SHOE = [226, 222, 212], BARK = [92, 74, 60];
+const GRASS = [[34, 62, 50], [52, 88, 52], [82, 118, 54], [124, 146, 62], [168, 172, 76]];
+const GRADIENT_Y = COS / (S * SIN), EDGE = .28;
+
+const rgb = (r, g, b) => (255 << 24 | Math.min(255, b | 0) << 16 | Math.min(255, g | 0) << 8 | Math.min(255, r | 0)) >>> 0;
+// hue-shifted ramp: shadows drift to violet, lights drift to warm yellow
+const ramps = new WeakMap();
+function rampOf(c) {
+  let ramp = ramps.get(c);
+  if (ramp) return ramp;
+  const mix = (m, tint, k) => rgb(lerp(c[0] * m, tint[0], k), lerp(c[1] * m, tint[1], k), lerp(c[2] * m, tint[2], k));
+  ramp = [mix(.4, COOL, .34), mix(.62, COOL, .18), mix(.84, COOL, .05), mix(1, WARM, 0), mix(1.1, WARM, .22)];
+  ramps.set(c, ramp);
+  return ramp;
+}
+const bayerAt = (ix, iy) => BAYER[(iy & 3) * 4 + (ix & 3)];
+function tint(i, r, g, b) {
+  const c = pix[i];
+  pix[i] = rgb((c & 255) * r, (c >> 8 & 255) * g, (c >> 16 & 255) * b);
+}
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const ease = t => t * t * (3 - 2 * t);
+function hash(x, y) {
+  const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
+  return s - Math.floor(s);
+}
+function noise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y), fx = ease(x - ix), fy = ease(y - iy);
+  return lerp(lerp(hash(ix, iy), hash(ix + 1, iy), fx), lerp(hash(ix, iy + 1), hash(ix + 1, iy + 1), fx), fy);
+}
+function project(x, y, z) {
+  const u = (x - y) / R2, v = (x + y) / R2;
+  return { sx: OX + u * S, sy: OY + (v * SIN - z * COS) * S, d: v * COS + z * SIN };
+}
+function unproject(sx, sy) {
+  const u = (sx - OX) / S, v = (sy - OY) / (S * SIN);
+  return { x: (u + v) / R2, y: (v - u) / R2 };
+}
+
+let capture = null; // when set, sphere() records pixels instead of drawing them
+function sphere(x, y, z, r, c, mode) {
+  const ramp = rampOf(c);
+  const p = project(x, y, z), rp = Math.max(r * S, .75);
+  const y0 = Math.max(0, Math.floor(p.sy - rp)), y1 = Math.min(H - 1, Math.ceil(p.sy + rp));
+  const x0 = Math.max(0, Math.floor(p.sx - rp)), x1 = Math.min(W - 1, Math.ceil(p.sx + rp));
+  for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+    const dx = (ix + .5 - p.sx) / rp, dy = (iy + .5 - p.sy) / rp, nn = dx * dx + dy * dy;
+    if (nn > 1) continue;
+    const nz = Math.sqrt(1 - nn), d = p.d + r * nz, i = iy * W + ix;
+    if (d <= zb[i]) continue;
+    let l = clamp(-.55 * dx - .6 * dy + .58 * nz, 0, 1);
+    if (mode === 'rough') l += (hash(ix, iy) - .5) * .55;
+    if (dy > .35) l = Math.max(l, .12 + dy * .24); // warm light bouncing off the ground
+    if (capture) {
+      capture.push(ix, iy, d, ramp[clamp(Math.floor(l * 4.4 + .2 + (bayerAt(ix, iy) - .5) * .7), 0, 4)]);
+      continue;
+    }
+    zb[i] = d;
+    if (mode === 'gloss' && l > .9) { pix[i] = rgb(255, 250, 232); continue; }
+    // figures get flat bands with no dither, so they read as sharp shapes against the textured ground
+    if (mode === 'solid') { pix[i] = ramp[clamp(Math.floor(l * 4.4 + .2), 1, 4)]; continue; }
+    pix[i] = ramp[clamp(Math.floor(l * 4.4 + .2 + (bayerAt(ix, iy) - .5) * .7), 0, 4)];
+  }
+}
+function capsule(a, b, r0, r1, colorOf, mode) {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  const n = Math.max(1, Math.ceil(len / (Math.min(r0, r1) * .45)));
+  for (let k = 0; k <= n; k++) {
+    const t = k / n, z = lerp(a[2], b[2], t);
+    sphere(lerp(a[0], b[0], t), lerp(a[1], b[1], t), z, lerp(r0, r1, t), colorOf(z), mode);
+  }
+}
+function box(x0, y0, z0, x1, y1, z1, c, seed = 0) {
+  const ramp = rampOf(c);
+  const paint = (x, y, z, base, grain) => {
+    const p = project(x, y, z), ix = p.sx | 0, iy = p.sy | 0;
+    if (ix < 0 || iy < 0 || ix >= W || iy >= H) return;
+    const i = iy * W + ix;
+    if (p.d <= zb[i]) return;
+    zb[i] = p.d;
+    pix[i] = ramp[clamp(Math.floor(base + (grain - .5) * 1.3 + (bayerAt(ix, iy) - .5) * .5), 0, 4)];
+  };
+  const step = .045, longX = x1 - x0 >= y1 - y0;
+  for (let a = x0; a <= x1; a += step) for (let b = y0; b <= y1; b += step) {
+    paint(a, b, z1, 3.4, longX ? noise(a * .8 + seed, b * 9) : noise(a * 9, b * .8 + seed));
+  }
+  for (let a = x0; a <= x1; a += step) for (let b = z0; b <= z1; b += step) paint(a, y1, b, 2.3, noise(a * .8 + seed, b * 9));
+  for (let a = y0; a <= y1; a += step) for (let b = z0; b <= z1; b += step) paint(x1, a, b, 1.2, noise(a * .8 + seed, b * 9));
+}
+function castShadow(x, y, z, r, strength = 1, dither = .4) {
+  const p = project(x + SHADOW_X * z, y + SHADOW_Y * z, 0);
+  const rx = r * S * 1.05, ry = rx * SIN + 1;
+  const y0 = Math.max(0, Math.floor(p.sy - ry)), y1 = Math.min(H - 1, Math.ceil(p.sy + ry));
+  const x0 = Math.max(0, Math.floor(p.sx - rx)), x1 = Math.min(W - 1, Math.ceil(p.sx + rx));
+  for (let iy = y0; iy <= y1; iy++) for (let ix = x0; ix <= x1; ix++) {
+    const dx = (ix + .5 - p.sx) / rx, dy = (iy + .5 - p.sy) / ry;
+    if (dx * dx + dy * dy + (bayerAt(ix, iy) - .5) * dither > 1) continue;
+    const i = iy * W + ix;
+    if (shadowMask[i] < strength) shadowMask[i] = strength;
+  }
+}
+function applyShadows(refZ) {
+  for (let i = 0; i < pix.length; i++) {
+    const s = shadowMask[i];
+    if (!s) continue;
+    shadowMask[i] = 0;
+    if (!ground[i] || zb[i] !== refZ[i]) continue;
+    if (s === 1) tint(i, .54, .52, .72);
+    else tint(i, .36, .34, .56);
+  }
+}
+// pixel-art edges from the depth buffer. The ground is never touched, so nothing halos around a figure:
+// an object darkens its own silhouette against the ground, and gets a warm rim only over another object
+function shadeEdges() {
+  for (let iy = 1; iy < H - 1; iy++) for (let ix = 1; ix < W - 1; ix++) {
+    const i = iy * W + ix, d = zb[i];
+    if (d < -1e8 || d === groundZ[i]) continue;
+    const a = i - W, b = i + W, c = i - 1, e = i + 1;
+    if (zb[a] === groundZ[a] || zb[b] === groundZ[b] || zb[c] === groundZ[c] || zb[e] === groundZ[e]) {
+      tint(i, .68, .66, .76);
+    } else if (d - zb[a] - GRADIENT_Y > EDGE || d - zb[c] > EDGE) {
+      const p = pix[i];
+      pix[i] = rgb(lerp(p & 255, WARM[0], .3), lerp(p >> 8 & 255, WARM[1], .3), lerp(p >> 16 & 255, WARM[2], .22));
+    } else if (zb[e] - d > EDGE || zb[b] - GRADIENT_Y - d > EDGE) {
+      tint(i, .74, .72, .82);
+    }
+  }
+}
+
+const KIND_NONE = 0, KIND_GRASS = 3;
+const kinds = new Uint8Array(W * H);
+/* ---------- wind ---------- */
+const WIND_FPS = 8; // stepped on purpose: the sway should feel hand-animated, not simulated
+const STILL = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const tufts = [], leaves = [];
+const staticShadow = new Uint8Array(W * H);
+const tuftLit = GRASS.map(c => rgb(...c)), tuftDark = GRASS.map(c => rgb(c[0] * .54, c[1] * .52, c[2] * .72));
+function growGrass() {
+  for (let iy = 3; iy < H; iy++) for (let ix = 0; ix < W; ix++) {
+    const i = iy * W + ix;
+    if (kinds[i] !== KIND_GRASS || hash(ix * 3, iy * 5) > .17) continue;
+    const height = 1 + (hash(ix, iy * 2) * 3 | 0);
+    tufts.push({
+      ix, iy, i, height, base: Math.round(noise(ix * .09, iy * .18) * 2.2),
+      phase: ix * .11 + iy * .19 + hash(ix, iy) * .9,
+      bloom: hash(ix * 7, iy) < .022 ? rgb(...(hash(ix, iy) > .5 ? [250, 246, 226] : [240, 200, 84])) : 0,
+    });
+  }
+}
+function drawTufts(t) {
+  for (const tuft of tufts) {
+    const gust = Math.sin(t * .8 + tuft.phase) + .5 * Math.sin(t * 2.1 + tuft.phase * 2.3);
+    const colors = staticShadow[tuft.i] ? tuftDark : tuftLit;
+    for (let k = 1; k <= tuft.height; k++) {
+      const jx = tuft.ix + Math.round(gust * .95 * k / 3), jy = tuft.iy - k;
+      if (jx < 0 || jx >= W) continue;
+      const j = jy * W + jx;
+      if ((kinds[j] !== KIND_GRASS && kinds[j] !== KIND_NONE) || zb[j] !== groundZ[j]) continue;
+      pix[j] = tuft.bloom && k === tuft.height ? tuft.bloom : colors[clamp(tuft.base + k + (gust > 1 ? 1 : 0), 1, 4)];
+    }
+  }
+}
+function drawLeaves(t) {
+  for (const leaf of leaves) {
+    const reach = clamp((leaf.z - 2.5) / 3, .3, 1);
+    const swayX = (Math.sin(t * .9 + leaf.x * .5 + leaf.z * .7) + .55 * Math.sin(t * 2.3 + leaf.k * 1.7)) * reach;
+    const dx = Math.round(swayX * .9), dy = Math.round(Math.sin(t * 1.3 + leaf.y + leaf.k) * reach * .45);
+    const px = leaf.pixels;
+    for (let n = 0; n < px.length; n += 4) {
+      const ix = px[n] + dx, iy = px[n + 1] + dy;
+      if (ix < 0 || iy < 0 || ix >= W || iy >= H) continue;
+      const i = iy * W + ix;
+      if (px[n + 2] <= zb[i]) continue;
+      zb[i] = px[n + 2];
+      pix[i] = px[n + 3];
+    }
+    if (leaf.k % 2 === 0) castShadow(leaf.x + swayX * .12, leaf.y, leaf.z, leaf.r);
+  }
+}
+function bakeOcclusion() {
+  const offsets = [];
+  for (const r of [2, 4]) for (let k = 0; k < 8; k++) {
+    offsets.push([Math.round(Math.cos(k * Math.PI / 4) * r), Math.round(Math.sin(k * Math.PI / 4) * r * .7)]);
+  }
+  for (let iy = 4; iy < H - 4; iy++) for (let ix = 4; ix < W - 4; ix++) {
+    const i = iy * W + ix;
+    if (!ground[i] || zb[i] !== groundZ[i]) continue;
+    let hits = 0;
+    for (const [ox, oy] of offsets) {
+      const j = (iy + oy) * W + ix + ox;
+      if (zb[j] !== groundZ[j]) hits++;
+    }
+    if (!hits) continue;
+    if (hits >= 8) tint(i, .56, .54, .72);
+    else if (hits / 8 > bayerAt(ix, iy)) tint(i, .74, .72, .84);
+  }
+}
+function plot(x, y, z, color) {
+  const p = project(x, y, z), ix = p.sx | 0, iy = p.sy | 0;
+  if (ix < 0 || iy < 0 || ix >= W || iy >= H) return;
+  const i = iy * W + ix;
+  if (p.d <= zb[i]) return;
+  zb[i] = p.d;
+  pix[i] = color;
+}
+// a gnarled trunk, then a dark core under silver-green leaf clusters that sway in drawLeaves
+const CROWN = [[.1, 0, 3.7, 1.6], [-1.4, -.7, 3.3, 1.2], [1.6, .7, 3.4, 1.25], [-.6, 1.1, 3.9, 1.1], [.9, -1.1, 4, 1.1], [.2, .1, 4.9, 1.05]];
+const LEAF_DEEP = [58, 84, 62], LEAF_MID = [100, 126, 78], LEAF_SILVER = [146, 162, 112];
+function growTree(x, y, scale = 1, count = 420, seed = 0) {
+  const bark = () => BARK;
+  capsule([x, y, 0], [x + .3 * scale, y + .1 * scale, 2.2 * scale], .36 * scale, .22 * scale, bark, 'rough');
+  capsule([x + .3 * scale, y + .1 * scale, 2.2 * scale], [x - .8 * scale, y - .4 * scale, 3.3 * scale], .2 * scale, .13 * scale, bark, 'rough');
+  capsule([x + .3 * scale, y + .1 * scale, 2.2 * scale], [x + 1.2 * scale, y + .4 * scale, 3.4 * scale], .2 * scale, .13 * scale, bark, 'rough');
+  for (let n = 0; n < count; n++) {
+    const k = n + seed, [cx, cy, cz, spread] = CROWN[n % CROWN.length];
+    const a = hash(k, 7) * 6.283, tilt = hash(k, 8) * 2 - 1, d = Math.cbrt(hash(k, 9)) * spread, flat = Math.sqrt(1 - tilt * tilt);
+    const rx = cx + Math.cos(a) * flat * d, ry = cy + Math.sin(a) * flat * d, rz = cz + tilt * d * .8;
+    const tone = hash(k, 10) + (rz - 4.2) * .22 + (d / spread - .5) * .3;
+    const leaf = tone > .72 ? LEAF_SILVER : tone > .3 ? LEAF_MID : LEAF_DEEP;
+    capture = [];
+    sphere(x + rx * scale, y + ry * scale, rz * scale, (.2 + hash(k, 11) * .22) * scale, leaf, 'rough');
+    leaves.push({ x: x + rx * scale, y: y + ry * scale, z: rz * scale, k, r: .42 * scale, pixels: capture });
+    capture = null;
+  }
+}
+function figure(px, py, yaw, pose, palette, addBone) {
+  const fx = Math.cos(yaw), fy = Math.sin(yaw), sx = -fy, sy = fx, base = pose.z || 0, k = pose.scale || 1;
+  const P = (a, b, c) => [px + (fx * a + sx * b) * k, py + (fy * a + sy * b) * k, c * k + base];
+  const add = (a, b, r0, r1, f) => addBone(a, b, r0 * k, r1 * k, f);
+  const t = palette;
+  const shirt = z => (Math.floor(z * 3.2) % 2 ? t.shirt : t.stripe); // about 3px bands: thinner ones read as noise
+  const legs = () => t.legs, skin = () => t.skin;
+  const crouch = pose.crouch || 0, lean = pose.lean || 0;
+  const hipZ = 1.28 - crouch * .4;
+  const hipA = -crouch * .15;
+  const shA = hipA + Math.sin(lean) * .95, shZ = hipZ + Math.cos(lean) * .95;
+  const neck = P(shA, 0, shZ + .08), head = P(shA + Math.sin(lean) * .32, 0, shZ + .36);
+  const stance = pose.stance == null ? .2 : pose.stance;
+  const footB = P(-stance * 1.2, .2, .12), footF = P(stance * 2, -.2, .12);
+  const kneeB = P(-stance * .4 + crouch * .12, .22, .68 - crouch * .1);
+  const kneeF = P(stance * 1.2 + crouch * .34, -.22, .72 - crouch * .08);
+  const hipB = P(hipA, .15, hipZ), hipF = P(hipA, -.15, hipZ);
+  add(hipB, kneeB, .17, .13, legs); add(kneeB, footB, .13, .1, legs);
+  add(hipF, kneeF, .17, .13, legs); add(kneeF, footF, .13, .1, legs);
+  add(footB, P(-stance * 1.2 + .16, .2, .08), .1, .09, () => SHOE);
+  add(footF, P(stance * 2 + .16, -.2, .08), .1, .09, () => SHOE);
+  add(P(hipA, 0, hipZ), neck, .3, .32, shirt);
+  add(neck, head, .11, .12, skin);
+  sphere2(add, head, .24, t.skin);
+  sphere2(add, [head[0] - fx * .06, head[1] - fy * .06, head[2] + .08], .205, t.hair);
+  const shR = P(shA, .36, shZ - .03), shL = P(shA, -.36, shZ - .03);
+  const armR = pose.armR == null ? 0 : pose.armR, armL = pose.armL == null ? .08 : pose.armL;
+  const elbowR = P(shA + Math.sin(armR) * .46, .4, shZ - .03 - Math.cos(armR) * .46);
+  const handR = P(shA + Math.sin(armR + .18) * .95, .42, shZ - .03 - Math.cos(armR + .18) * .95);
+  const elbowL = P(shA + Math.sin(armL) * .46, -.42, shZ - .03 - Math.cos(armL) * .46);
+  const handL = P(shA + Math.sin(armL + .2) * .9, -.43, shZ - .03 - Math.cos(armL + .2) * .9);
+  add(shR, elbowR, .12, .1, shirt); add(elbowR, handR, .09, .08, skin);
+  add(shL, elbowL, .12, .1, shirt); add(elbowL, handL, .09, .08, skin);
+  return handR;
+}
+function sphere2(add, c, r, color) { add(c, c, r, r, () => color); }
+const dynamicAdd = (a, b, r0, r1, f) => { capsule(a, b, r0, r1, f, 'solid'); pendingShadows.push(a, r0, b, r1); };
+const pendingShadows = [];
+function flushShadows() {
+  for (let i = 0; i < pendingShadows.length; i += 4) {
+    const a = pendingShadows[i], ra = pendingShadows[i + 1], c = pendingShadows[i + 2];
+    const n = Math.max(1, Math.ceil(Math.hypot(c[0] - a[0], c[1] - a[1], c[2] - a[2]) / .25));
+    for (let k = 0; k <= n; k++) {
+      const t = k / n;
+      castShadow(lerp(a[0], c[0], t), lerp(a[1], c[1], t), lerp(a[2], c[2], t), ra * .9, 1, 0);
+    }
+    if (a[2] < .25) castShadow(a[0], a[1], 0, .2, 2, 0); // contact under the feet
+  }
+}
+function drawDots(points, color) {
+  for (const [sx, sy] of points) {
+    const ix = sx | 0, iy = sy | 0;
+    if (ix >= 0 && iy >= 0 && ix < W && iy < H) pix[iy * W + ix] = color;
+  }
+}
+const ARROW = [
+  '....ooooo....',
+  '....oXXXo....',
+  '....oXXXo....',
+  '....oXXXo....',
+  'oooooXXXooooo',
+  'oXXXXXXXXXXXo',
+  '.oXXXXXXXXXo.',
+  '..oXXXXXXXo..',
+  '...oXXXXXo...',
+  '....oXXXo....',
+  '.....oXo.....',
+  '......o......',
+];
+const INK = rgb(28, 27, 25), SIGNAL = rgb(255, 214, 10), PAPER = rgb(255, 255, 255);
+// signals get a white halo, so they separate from whatever busy detail sits behind them
+function haloDots(points) {
+  const halo = [];
+  for (const [x, y] of points) for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) halo.push([x + dx, y + dy]);
+  drawDots(halo, PAPER);
+}
+// a bobbing arrow whose tip points at (sx, sy)
+function drawArrow(sx, sy, time) {
+  const bob = STILL ? 0 : Math.floor(time * 3) % 2 * 2;
+  const left = Math.round(sx) - 6, top = Math.round(sy) - ARROW.length - bob;
+  const ink = [], fill = [];
+  ARROW.forEach((row, y) => [...row].forEach((cell, x) => {
+    if (cell === 'o') ink.push([left + x, top + y]);
+    if (cell === 'X') fill.push([left + x, top + y]);
+  }));
+  haloDots(ink);
+  drawDots(ink, INK);
+  drawDots(fill, SIGNAL);
+}
+function fit() {
+  const dpr = window.devicePixelRatio || 1;
+  const fitScale = Math.min(innerWidth / W, (innerHeight - 40) / H);
+  const scale = Math.max(1, Math.floor(fitScale * dpr)) / dpr;
+  canvas.style.width = W * scale + 'px';
+  canvas.style.height = H * scale + 'px';
+}
+</script>
+<script>
+'use strict';
+/* ---------- テンポと譜面 ---------- */
+const BPM = 120, BEAT = 60 / BPM, STEP16 = BEAT / 4, BAR = BEAT * 4;
+const SCORE = { hit: 100, perfect: 150, oops: -100 };   // 点数：ドカッ／ドカーン／うっかり
+const PERFECT = .07, WINDOW = .16, LOOKAHEAD = .15, HOP = .2, GAP = 1.7, QUEUE_MAX = 7;
+// 1文字 = 1拍。N = ふつう、F = ニセきっぷ、. = だれも来ない。その拍に改札へ着き、次の拍で通過／ぶっ飛ばす
+const CHART = ['....', 'N.N.', 'N.F.', 'N.N.', 'F.N.', 'N.NN', 'F.N.', 'NN.F', 'N.F.',
+  'NNNN', 'NFNN', 'NNFN', 'FNFN', 'N.F.', 'NNFF', 'FFF.', '....'];
+const STYLE = ['count', 'A', 'A', 'A', 'A', 'B', 'B', 'B', 'B', 'C', 'C', 'C', 'C', 'D', 'D', 'D', 'end'];
+const CHORDS = [[130.81, [261.63, 329.63, 392]], [110, [220, 261.63, 329.63]], [87.31, [174.61, 220, 261.63]], [98, [196, 246.94, 293.66]]];
+const MELODY = [[659.25, 0, 783.99, 0, 1046.5, 0, 783.99, 880], [1046.5, 0, 880, 0, 659.25, 0, 880, 0],
+  [698.46, 0, 880, 0, 1046.5, 0, 1174.66, 1046.5], [987.77, 0, 783.99, 0, 587.33, 0, 783.99, 0]];
+
+/* ---------- 見た目 ---------- */
+const TILE = [[205, 201, 193], [212, 208, 200], [219, 215, 207]];
+const TILE_LINE = rgb(184, 178, 168), QUEUE_LINE = rgb(96, 128, 196), BRAILLE = rgb(232, 190, 52), BRAILLE_DOT = rgb(204, 160, 36);
+const MACHINE = [228, 228, 222], STRIPE = [48, 168, 104], PLANTER = [150, 120, 92], READER = [44, 64, 120];
+const FLAP = [240, 166, 40], FLAP_RED = [222, 62, 50], LAMP_G = [70, 226, 120], LAMP_R = [240, 60, 50], LAMP_OFF = [130, 134, 142];
+const GLOVE = [246, 246, 240], TICKET = [226, 64, 52], NOSE = [240, 150, 140], BLACK = [26, 24, 28], GOLD = [232, 190, 60];
+const SILHOUETTE = { shirt: [72, 74, 104], stripe: [72, 74, 104], legs: [62, 64, 92], hair: [62, 64, 92], skin: [84, 86, 116] };
+const STAFF = { shirt: [40, 54, 98], stripe: [40, 54, 98], legs: [30, 40, 74], hair: [30, 26, 24], skin: [222, 170, 132] };
+const PEOPLE = [
+  { shirt: [46, 62, 106], stripe: [46, 62, 106], legs: [36, 42, 64], hair: [34, 28, 26], skin: [226, 180, 144] },
+  { shirt: [32, 34, 46], stripe: [32, 34, 46], legs: [28, 30, 40], hair: [26, 22, 20], skin: [214, 164, 128] },
+  { shirt: [232, 150, 170], stripe: [244, 232, 228], legs: [60, 62, 88], hair: [104, 66, 40], skin: [230, 186, 150] },
+  { shirt: [236, 188, 62], stripe: [236, 188, 62], legs: [62, 88, 136], hair: [70, 50, 36], skin: [196, 146, 110] },
+  { shirt: [196, 168, 120], stripe: [226, 214, 186], legs: [110, 96, 80], hair: [212, 210, 206], skin: [222, 172, 136] },
+  { shirt: [94, 160, 120], stripe: [226, 232, 220], legs: [60, 58, 64], hair: [40, 30, 26], skin: [176, 124, 92] },
+];
+const CONFETTI = [rgb(255, 214, 10), rgb(240, 80, 70), rgb(80, 200, 190), rgb(90, 130, 230), PAPER];
+
+/* ---------- 駅（コンコース・ホーム・一段低い線路）の寸法と色 ---------- */
+// x：左（奥）から 線路の溝 → ホーム → コンコース。y：奥の壁（Y_MIN）から 手前の切り口（Y_MAX）まで
+const X_PIT0 = -13.4, X_PLAT0 = -10.2, X_CONC0 = -7.6, X_MAX = 7.6, Y_MIN = -15.6, Y_MAX = 8.4, PIT_Z = -1.1;
+const RAIL_X = [-12.3, -11.3];
+const PLATFORM = [[178, 176, 170], [188, 186, 180], [198, 196, 190]];
+const EDGE_WHITE = rgb(240, 238, 232), PLAT_LINE = rgb(158, 156, 150);
+const BALLAST = [[92, 86, 82], [116, 108, 100], [140, 132, 122]], SLEEPER = [[88, 66, 50], [108, 82, 60]];
+const WALL = [226, 220, 206], WALL_BASE = [120, 112, 104], WALL_CONC = [168, 164, 156], SLAB = [196, 190, 178], TUNNEL = [26, 26, 40];
+const RAIL = [150, 156, 170], POLE = [116, 122, 134], WIRE = rgb(56, 58, 66);
+const PILLAR = [236, 236, 230], BEAM = [46, 124, 92], SIGN_NAVY = [40, 54, 98], SIGN_TEXT = [236, 236, 236];
+const TICKET_MACHINE = [214, 216, 220], SCREEN = [36, 70, 140], KIPPU_SIGN = [236, 128, 40], CLOCK = [246, 246, 240];
+const BOARD = [242, 242, 238], POST = [96, 100, 110], BENCH = [222, 120, 60], POSTER_A = [236, 140, 120], POSTER_B = [120, 170, 220], NAME_INK = [40, 40, 48];
+const CAR_BODY = [206, 210, 216], CAR_ROOF = [146, 150, 160], CAR_STRIPE = [46, 164, 92], CAR_WINDOW = [40, 48, 66], CAR_DOOR = [178, 182, 190], CAR_DARK = [50, 50, 58];
+const HEADLIGHT = [255, 242, 196], DEST = [240, 150, 40];
+
+function floorColor(x, y, ix, iy, i) {                 // 高さ0の床：左がホーム、右がコンコース
+  if (x < X_PLAT0 || x > X_MAX || y < Y_MIN || y > Y_MAX) return 0;
+  kinds[i] = 1;
+  const fine = hash(ix, iy);
+  if (x < X_CONC0) {                                         // ホーム
+    if (x < X_PLAT0 + .18) return EDGE_WHITE;                 // ホームの端の白線
+    if (x > X_PLAT0 + .55 && x < X_PLAT0 + 1.05) {            // 点字ブロック
+      const tx = ((x * 6) % 1 + 1) % 1, ty = ((y * 6) % 1 + 1) % 1;
+      return tx < .45 && ty < .45 ? BRAILLE_DOT : BRAILLE;
+    }
+    if (x > X_CONC0 - .08) return PLAT_LINE;                   // ホームとコンコースの境目
+    const ty = ((y / .9) % 1 + 1) % 1;
+    if (ty < .05 && fine > .15) return PLAT_LINE;
+    const v = .5 + (noise(x * .7, y * .7) - .5) * .5;
+    return rgb(...PLATFORM[clamp(Math.floor(v * 3 + (bayerAt(ix, iy) - .5) * .5), 0, 2)]);
+  }
+  const tx = x / 1.35 - Math.floor(x / 1.35), ty = y / 1.35 - Math.floor(y / 1.35);
+  if ((tx < .06 || ty < .06) && fine > .1) return TILE_LINE;
+  if (Math.abs(x) < .1 && y < -1.4) return QUEUE_LINE;                 // 整列ライン
+  if (x > 3.5 && x < 4.1) return (tx * 6 % 1 < .4 && ty * 6 % 1 < .4) ? BRAILLE_DOT : BRAILLE;  // 点字ブロック
+  const v = .5 + (noise(x * .5, y * .5) - .5) * .55;
+  return rgb(...TILE[clamp(Math.floor(v * 3 + (bayerAt(ix, iy) - .5) * .5), 0, 2)]);
+}
+
+function trackColor(x, y, ix, iy) {                          // 線路の溝の底（高さ PIT_Z）：砂利と枕木
+  if (y < Y_MIN) return rgb(...TUNNEL);
+  const sy = ((y % .75) + .75) % .75;
+  if (x > -12.9 && x < -10.7 && sy < .3) return rgb(...SLEEPER[hash(Math.floor(y / .75), 3) > .5 ? 1 : 0]);
+  const v = noise(x * 3.1, y * 3.1) * .7 + hash(ix, iy) * .5;
+  return rgb(...BALLAST[clamp(Math.floor(v * 2.2), 0, 2)]);
+}
+
+function bake() {
+  zb.fill(-1e9);
+  pix.fill(rgb(255, 255, 255));
+  // 線路の溝は床より PIT_Z だけ低い。上から斜めにのぞくので、溝の底は 画面では この分だけ奥にずれて見える
+  const sink = -PIT_Z * (COS / SIN) / R2;
+  for (let iy = 0; iy < H; iy++) for (let ix = 0; ix < W; ix++) {
+    const g = unproject(ix + .5, iy + .5), i = iy * W + ix;
+    let c = 0, x = g.x, y = g.y, z = 0;
+    if (g.x >= X_PIT0 && g.x < X_PLAT0) {                     // 床の高さでは溝の上 → 溝の底を見る
+      x = g.x - sink; y = g.y - sink; z = PIT_Z;
+      if (x >= X_PIT0 && y <= Y_MAX && y >= Y_MIN - 3) { c = trackColor(x, y, ix, iy); kinds[i] = 1; }
+    } else c = floorColor(g.x, g.y, ix, iy, i);
+    if (!c) continue;
+    pix[i] = c; ground[i] = 1;
+    zb[i] = (x + y) / R2 * COS + z * SIN;
+  }
+  growGrass();
+  groundZ.set(zb);
+  // 線路：レール2本
+  for (const rx of RAIL_X) box(rx - .07, Y_MIN - 2, PIT_Z, rx + .07, Y_MAX, PIT_Z + .16, RAIL, 50);
+  // 奥の壁：線路の向こうの壁と、うしろの壁。うしろの壁には 電車が出てくるトンネルの口
+  box(X_PIT0 - .35, Y_MIN, PIT_Z, X_PIT0, Y_MAX, 1.3, WALL_CONC, 21);              // 線路の向こうの壁
+  box(X_PIT0, Y_MIN - .15, PIT_Z, X_PLAT0, Y_MIN, 3.9, TUNNEL, 24);                  // トンネルの口（暗い）
+  box(X_PIT0 - .35, Y_MIN - .6, 1.3, X_PIT0, Y_MIN, 3.9, WALL, 26);                  // トンネルの左の壁
+  box(X_PIT0 - .35, Y_MIN - .6, 3.9, X_PLAT0, Y_MIN, 4.4, WALL, 23);                 // トンネルの上の壁
+  box(X_PLAT0, Y_MIN - .6, 0, X_MAX, Y_MIN, 4.4, WALL, 22);                          // うしろの壁
+  box(X_PLAT0, Y_MIN, 0, X_MAX, Y_MIN + .06, .32, WALL_BASE, 25);                    // 幅木
+  // 壁の飾り：案内板・ポスター・時計
+  box(-6.2, Y_MIN, 3.15, 6.2, Y_MIN + .08, 3.85, SIGN_NAVY, 27);
+  for (const [a, b] of [[-5.6, -4.1], [-3.6, -2.9], [-2.4, -.9], [1.2, 2.6], [3.1, 3.8], [4.3, 5.6]]) box(a, Y_MIN + .08, 3.38, b, Y_MIN + .1, 3.62, SIGN_TEXT, 28);
+  box(-6.9, Y_MIN, 1.1, -5.7, Y_MIN + .05, 2.6, POSTER_A, 29);
+  box(-5.3, Y_MIN, 1.1, -4.1, Y_MIN + .05, 2.6, POSTER_B, 30);
+  sphere(-1.8, Y_MIN + .25, 2.45, .42, CLOCK, 'solid');
+  { const c = project(-1.8, Y_MIN + .25, 2.45); drawDots([[c.sx, c.sy - 1], [c.sx, c.sy - 2], [c.sx, c.sy], [c.sx + 1, c.sy], [c.sx + 2, c.sy]], INK); }
+  // 券売機と「きっぷうりば」
+  for (let k = 0; k < 3; k++) {
+    const x0 = 1.7 + k * 1.25;
+    box(x0, Y_MIN, 0, x0 + 1.1, Y_MIN + .85, 2.1, TICKET_MACHINE, 31 + k);
+    box(x0 + .18, Y_MIN + .85, 1.05, x0 + .92, Y_MIN + .9, 1.7, SCREEN, 34 + k);
+    for (let z = .3; z <= 1.8; z += .5) castShadow(x0 + .55, Y_MIN + .45, z, .55, 1, .4);
+  }
+  box(1.6, Y_MIN + .05, 2.45, 5.45, Y_MIN + .45, 2.85, KIPPU_SIGN, 37);
+  // ホーム：柱と梁・駅名標・ベンチ
+  for (const y of [-12.4, -5.9, .6, 6.6]) {
+    box(-8.95, y, 0, -8.45, y + .5, 4.25, PILLAR, 40);
+    for (let z = .4; z <= 4; z += .6) castShadow(-8.7, y + .25, z, .3, 1, .4);
+  }
+  box(-9, Y_MIN, 4.25, -8.4, Y_MAX - .4, 4.6, BEAM, 41);
+  box(-8.95, -9.85, 0, -8.83, -9.7, 2.1, POST, 42); box(-8.95, -7.7, 0, -8.83, -7.55, 2.1, POST, 43);
+  box(-9, -9.95, 2.1, -8.82, -7.45, 3.15, BOARD, 44);
+  box(-8.82, -9.95, 2.1, -8.8, -7.45, 2.35, STRIPE, 45);
+  box(-8.82, -9.4, 2.6, -8.8, -8, 2.85, NAME_INK, 46);
+  box(-9.25, -3.9, 0, -8.35, -2, .42, BENCH, 47);
+  box(-9.25, -3.9, .42, -9.08, -2, .95, BENCH, 48);
+  for (let y = -3.7; y < -2.1; y += .4) castShadow(-8.8, y, .3, .45, 1, .4);
+  // 架線の柱と架線
+  for (const y of [-12, -3, 6]) {
+    box(X_PIT0 - .3, y, 1.3, X_PIT0 - .1, y + .2, 5.3, POLE, 51);
+    box(X_PIT0 - .3, y, 5.05, -11.2, y + .14, 5.2, POLE, 52);
+  }
+  for (let y = Y_MIN; y <= Y_MAX; y += .03) plot(-11.8, y, 4.95, WIRE);
+  // 改札機（左右）
+  for (const [x0, x1] of [[-2.5, -1], [1, 2.5]]) {
+    box(x0, -1.15, 0, x1, 1.15, 1.55, MACHINE, x0 | 0);
+    box(x0, 1.15, 1.18, x1, 1.2, 1.42, STRIPE, 4);
+    for (let y = -1.1; y <= 1.1; y += .25) castShadow((x0 + x1) / 2, y, 1.1, .78);
+  }
+  box(-1.55, -.75, 1.55, -1.1, -.25, 1.6, READER, 6);         // ICリーダー
+  box(1.35, -.9, 1.55, 2.2, -.8, 1.58, [40, 40, 44], 7);       // きっぷ投入口
+  // 鉢植え（屋内）
+  box(-7.3, -15.4, 0, -6.4, -14.5, .6, PLANTER, 8); growTree(-6.85, -14.95, .42, 140);
+  castShadow(-6.85, -14.95, .4, .7);
+  // 島の厚み（手前の2面）：建物を切り取った模型に見せる
+  box(X_MAX - .02, Y_MIN, -1.5, X_MAX, Y_MAX, 0, SLAB, 60);
+  box(X_PLAT0, Y_MAX - .02, -1.5, X_MAX, Y_MAX, 0, SLAB, 61);
+  box(X_PIT0 - .35, Y_MAX - .02, -1.5, X_PLAT0, Y_MAX, PIT_Z, SLAB, 62);
+  flushShadows();
+  bakeOcclusion();
+  staticShadow.set(shadowMask);
+  applyShadows(groundZ);
+  bakedPix.set(pix);
+  bakedZ.set(zb);
+}
+
+/* ---------- ゲームの状態 ---------- */
+const G = { trains: [], phase: 'ready', startAt: 0, lag: 0, time: 0, musicStep: 0, cueIdx: 0, customers: [], cues: [],
+  score: 0, blasted: 0, perfects: 0, sneaks: 0, oops: 0, combo: 0, maxCombo: 0, fakes: 0, lockUntil: -1,
+  punch: null, shake: null, sparks: [], parts: [], stars: [], status: '' };
+const TOTAL = CHART.length * BAR;
+const nodes = { s0: document.getElementById('s0'), s1: document.getElementById('s1'), status: document.getElementById('status') };
+
+function buildChart() {
+  const customers = [], cues = [];
+  let id = 0, dir = 1;
+  CHART.forEach((bar, b) => [...bar].forEach((ch, k) => {
+    if (ch !== 'N' && ch !== 'F') return;
+    const stepAt = b * BAR + k * BEAT, fake = ch === 'F';
+    dir = -dir;
+    customers.push({ id, fake, stepAt, actAt: stepAt + BEAT, pal: PEOPLE[(id * 7 + 3) % PEOPLE.length], dir,
+      result: '', resolvedAt: 0, hitAt: 0, perfect: false, oops: false, oopsAt: -9 });
+    id++;
+    cues.push({ at: stepAt, type: 'step' });
+    if (fake) cues.push({ at: stepAt, type: 'ping' }, { at: stepAt + BEAT / 2, type: 'pong' });
+    else cues.push({ at: stepAt + BEAT, type: 'pass' });
+  }));
+  cues.sort((a, b) => a.at - b.at);
+  return { customers, cues };
+}
+function resetGame() {
+  Object.assign(G, buildChart(), { score: 0, blasted: 0, perfects: 0, sneaks: 0, oops: 0, combo: 0, maxCombo: 0, lockUntil: -1,
+    punch: null, shake: null, sparks: [], parts: [], stars: [], musicStep: 0, cueIdx: 0 });
+  G.fakes = G.customers.filter(c => c.fake).length;
+  const b1 = 2 + Math.floor(Math.random() * 5), b2 = b1 + 5 + Math.floor(Math.random() * (CHART.length - 8 - b1));
+  G.trains = [b1, b2].map(b => b * BAR + Math.floor(Math.random() * 4) * BEAT);
+  G.cues = G.cues.concat(G.trains.map(at => ({ at, type: 'train' }))).sort((a, b) => a.at - b.at);
+}
+function setStatus(text, hot = false) {
+  if (text === G.status) return;
+  G.status = text;
+  nodes.status.textContent = text;
+  nodes.status.classList.toggle('hot', hot);
+}
+let popUntil = 0;
+function pop(text, t) { setStatus(text, true); popUntil = t + .45; }
+function renderHud() { nodes.s0.textContent = G.score; nodes.s1.textContent = G.combo; }
+
+/* ---------- 判定 ---------- */
+const leaveTime = c => c.result ? c.resolvedAt : c.fake ? c.actAt + WINDOW : c.actAt;
+function hit(t) {
+  if (G.phase !== 'play' || t < G.lockUntil) return;
+  let fake = null, fd = Infinity;
+  for (const c of G.customers) {
+    if (c.stepAt > t + .05) break;
+    if (!c.fake || c.result) continue;
+    const d = Math.abs(t - c.actAt);
+    if (d < fd) { fd = d; fake = c; }
+  }
+  if (fake && fd <= WINDOW) return blast(fake, t, fd <= PERFECT);
+  if (fake && t < fake.actAt) {                          // 早すぎ → すぐ改札を飛びこえて逃げられる（点は引かない）
+    fake.result = 'sneak'; fake.resolvedAt = t;
+    G.sneaks++; G.combo = 0; G.lockUntil = t + .12;
+    G.punch = { start: t, land: t + .06, miss: true };
+    sfx('whoosh', t); sfx('sneak', t + .05); pop('はやい！ にげられた…', t); renderHud(); return;
+  }
+  for (const c of G.customers) {
+    if (c.stepAt > t + .05) break;
+    if (c.fake || c.oops || Math.abs(t - c.actAt) > WINDOW) continue;
+    c.oops = true; c.oopsAt = t; G.oops++; G.combo = 0;   // うっかり → お客さんが怒って −100点（頭に 💢）
+    G.score += SCORE.oops;
+    G.punch = { start: t, land: t + .06, miss: true };
+    sfx('oops', t); pop(`うっかり！ −${-SCORE.oops}`, t); renderHud(); return;
+  }
+  G.punch = { start: t, land: t + .06, miss: true };
+  sfx('whoosh', t);
+}
+function blast(c, t, perfect) {
+  c.result = 'blast'; c.perfect = perfect;
+  c.hitAt = Math.max(t, c.actAt);                        // 早めに押しても 拍ぴったりで鳴らす
+  c.resolvedAt = c.hitAt;
+  G.blasted++; if (perfect) G.perfects++;
+  G.score += perfect ? SCORE.perfect : SCORE.hit;
+  G.combo++; G.maxCombo = Math.max(G.maxCombo, G.combo);
+  G.punch = { start: Math.max(t, c.hitAt - .07), land: c.hitAt, miss: false };
+  G.shake = { t0: c.hitAt, amp: perfect ? 3 : 2 };
+  G.sparks.push({ t0: c.hitAt, x: .1, y: .1, z: 2.1 });
+  for (let k = 0; k < 16; k++) {
+    G.parts.push({ t0: c.hitAt, x: 0, y: 0, z: 2.1, vx: (hash(c.id, k) - .5) * 7 - 1.5, vy: (hash(k, c.id) - .5) * 7 - 1.5,
+      vz: 4 + hash(c.id * 3, k) * 5, color: CONFETTI[k % CONFETTI.length], life: 1 });
+  }
+  G.parts.push({ t0: c.hitAt, x: 0, y: .3, z: 2.6, vx: c.dir * 2.5, vy: 2, vz: 6, color: rgb(...NOSE), life: 1.2, big: true });
+  G.stars.push({ t0: c.hitAt + .8, c });
+  sfx('blast', c.hitAt, perfect);
+  pop(perfect ? `ドカーン！ +${SCORE.perfect}` : `ドカッ！ +${SCORE.hit}`, c.hitAt);
+  renderHud();
+}
+function judgeMisses(t) {
+  for (const c of G.customers) {
+    if (c.stepAt > t) break;
+    if (c.result) continue;
+    if (c.fake && t > c.actAt + WINDOW) {
+      c.result = 'sneak'; c.resolvedAt = c.actAt + WINDOW;
+      G.sneaks++; G.combo = 0;
+      sfx('sneak', c.resolvedAt); pop('すりぬけ…', t); renderHud();
+    } else if (!c.fake && t >= c.actAt) { c.result = 'pass'; c.resolvedAt = c.actAt; }
+  }
+}
+
+/* ---------- 人の位置とポーズ ---------- */
+function holdK(prev, c, t) {                             // 前のニセ客がまだいるあいだ 少し手前で待つ
+  const pl = leaveTime(prev);
+  if (pl <= c.stepAt + .001) return 0;
+  if (t < pl) return .45;
+  return .45 * (1 - clamp((t - pl) / .1, 0, 1));
+}
+function disguise(px, py, yaw, base) {                    // 鼻メガネ
+  const fx = Math.cos(yaw), fy = Math.sin(yaw), sx = -fy, sy = fx, hz = base + 2.59;
+  const at = (a, b, z) => [px + fx * a + sx * b, py + fy * a + sy * b, z];
+  dynamicAdd(at(.27, .13, hz + .05), at(.27, -.13, hz + .05), .05, .05, () => BLACK);
+  sphere(...at(.31, 0, hz - .05), .1, NOSE, 'solid');
+  dynamicAdd(at(.27, .1, hz - .15), at(.27, -.1, hz - .15), .045, .045, () => BLACK);
+}
+function drawPeople(t) {
+  const cs = G.customers;
+  let k = 0, arc = 0, first = true;
+  const bf = (((t % BEAT) + BEAT) % BEAT) / BEAT;
+  for (let i = 0; i < cs.length; i++) {
+    const c = cs[i], prev = i ? cs[i - 1] : null;
+    const look = t >= c.stepAt - HOP * .6 ? c.pal : SILHOUETTE;   // 改札に着く直前まで 姿はわからない
+    if (c.stepAt > t) {                                   // 行列
+      const e = ease(clamp((c.stepAt - t) / HOP, 0, 1));
+      if (first) { arc = e < 1 ? Math.sin(Math.PI * e) : 0; first = false; }
+      k += e;
+      if (k > QUEUE_MAX + 1) break;
+      const kk = Math.max(k, prev ? holdK(prev, c, t) : 0);
+      figure(0, -GAP * kk, Math.PI / 2, { z: arc * .3, stance: .12 + arc * .2, armR: .1, armL: .1, crouch: .05 * Math.exp(-bf * 6) }, look, dynamicAdd);
+      continue;
+    }
+    const leave = leaveTime(c);
+    if (t < leave) {                                      // 改札の前
+      const kk = prev ? holdK(prev, c, t) : 0, y = -GAP * kk;
+      let pose = c.fake ? { armR: 2.9, armL: .2, stance: .14 } : { armR: 1.25, armL: .1, stance: .14 };
+      if (c.fake && t > c.actAt) pose.crouch = .25;
+      if (c.oops && t >= c.oopsAt && t - c.oopsAt < .4) pose = { lean: -.35, armR: 2.2, armL: 2.2, stance: .2 };
+      const hand = figure(0, y, Math.PI / 2, pose, look, dynamicAdd);
+      if (c.fake && kk < .05) { disguise(0, y, Math.PI / 2, (pose.crouch || 0) * -.4); sphere(hand[0], hand[1], hand[2] + .12, .2, TICKET, 'solid'); }
+      continue;
+    }
+    const dt = t - leave;
+    if (c.result === 'blast') {                           // 空のかなたへ
+      if (dt > .85) continue;
+      const p = dt / .85;
+      figure(-8 * p, -13 * p, Math.PI / 2 + p * 14, { z: 15 * p * p + 3 * Math.sin(Math.PI * p), armR: 3, armL: 3, stance: .35, lean: .4 }, c.pal, dynamicAdd);
+    } else if (c.result === 'sneak') {                     // ぴょーんと飛びこえる
+      if (dt > .75) continue;
+      const p = dt / .75;
+      figure(c.dir * 1.2 * p, 7 * p, Math.PI / 2, { z: 2.4 * Math.sin(Math.PI * Math.min(1, p * 1.3)), armR: 3, armL: 3, stance: .3, crouch: .1 }, c.pal, dynamicAdd);
+      disguise(c.dir * 1.2 * p, 7 * p, Math.PI / 2, 2.4 * Math.sin(Math.PI * Math.min(1, p * 1.3)));
+    } else {                                              // 通過
+      if (dt > .9) continue;
+      const sw = Math.sin(dt * 16);
+      const oopsy = c.oops && t - c.oopsAt < .5;
+      figure(c.dir * .5 * dt, 7.4 * dt, Math.PI / 2, oopsy ? { lean: -.35, armR: 2.2, armL: 2.2, stance: .2 } : { stance: .2 + sw * .16, armR: sw * .5, armL: -sw * .5, lean: .08 }, c.pal, dynamicAdd);
+    }
+  }
+}
+function drawStaff(t) {                                   // プレイヤー＝駅員さん（白い手ぶくろ）
+  const bf = (((t % BEAT) + BEAT) % BEAT) / BEAT;
+  let ext = 0;
+  const p = G.punch;
+  if (p && t >= p.start) {
+    if (t < p.land) ext = ease(clamp((t - p.start) / Math.max(.001, p.land - p.start), 0, 1));
+    else if (t < p.land + .06) ext = 1;
+    else ext = 1 - ease(clamp((t - p.land - .06) / .18, 0, 1));
+  }
+  const yaw = Math.atan2(-1.9, -2.3);
+  const hand = figure(2.3, 2.15, yaw, { crouch: .06 * Math.exp(-bf * 6) + ext * .1, lean: ext * .2, armR: lerp(.7, 1.6, ext), armL: .2, stance: .18 }, STAFF, dynamicAdd);
+  const head = [2.3, 2.15, 2.59 + .08];
+  sphere(head[0], head[1], head[2], .25, STAFF.shirt, 'solid');            // 帽子
+  sphere(head[0] + Math.cos(yaw) * .22, head[1] + Math.sin(yaw) * .22, head[2] - .02, .07, GOLD, 'solid');
+  const reach = p && !p.miss ? [.25, .15, 2.1] : [.6, .9, 2.0];
+  const glove = [lerp(hand[0], reach[0], ext), lerp(hand[1], reach[1], ext), lerp(hand[2], reach[2], ext)];
+  if (ext > .05) dynamicAdd(hand, glove, .1, .12, () => STAFF.shirt);
+  sphere(glove[0], glove[1], glove[2], .36, GLOVE, 'solid');
+  castShadow(glove[0], glove[1], glove[2], .34, 1, 0);
+}
+function gateState(t) {
+  let open = 0, red = false, green = false, tap = false;
+  for (const c of G.customers) {
+    if (c.stepAt > t + .01) break;
+    if (c.fake) { if (t >= c.stepAt && t < leaveTime(c) + .04) red = true; continue; }
+    if (t >= c.stepAt && t < c.actAt + .25) green = true;
+    const d = t - c.actAt;
+    if (d > -.05 && d < .42) open = Math.max(open, d < 0 ? (d + .05) / .05 : d < .3 ? 1 : 1 - (d - .3) / .12);
+    if (d >= 0 && d < .18) tap = true;
+  }
+  return { open: red ? 0 : clamp(open, 0, 1), red, green: green && !red, tap };
+}
+function drawGate(t) {
+  const s = gateState(t), len = lerp(.88, .12, s.open);
+  box(-1, -.07, .85, -1 + len, .07, 1.3, s.red ? FLAP_RED : FLAP, 11);
+  box(1 - len, -.07, .85, 1, .07, 1.3, s.red ? FLAP_RED : FLAP, 12);
+  const blink = Math.floor(t * 8) % 2 === 0;
+  const lamp = s.red ? (blink ? LAMP_R : LAMP_OFF) : s.green ? LAMP_G : LAMP_OFF;
+  sphere(-1.2, .95, 1.66, .13, lamp, 'solid');
+  sphere(1.2, .95, 1.66, .13, lamp, 'solid');
+  if (s.tap) sphere(-1.32, -.5, 1.68, .17, [130, 230, 255], 'solid');
+}
+
+/* ---------- 1フレーム描く ---------- */
+// 怒りマーク 💢（ドット絵）。4本の曲がった線の角を内側に向けて、十字のすき間を作る
+const ANGER = [
+  '...XX.XX...',
+  '...XX.XX...',
+  '..XXX.XXX..',
+  'XXXX...XXXX',
+  'XXX.....XXX',
+  '...........',
+  'XXX.....XXX',
+  'XXXX...XXXX',
+  '..XXX.XXX..',
+  '...XX.XX...',
+  '...XX.XX...',
+];
+const ANGER_RED = rgb(226, 56, 48);
+function drawAnger(sx, sy, d) {
+  if (d > .7 && Math.floor(d * 20) % 2) return;            // 消える前に ちかちか
+  const beat = STILL ? 0 : Math.floor(d * 10) % 2;         // ぴくぴく動く
+  const left = Math.round(sx) - 5 + beat, top = Math.round(sy) - 5 - beat;
+  const dots = [];
+  ANGER.forEach((row, y) => [...row].forEach((cell, x) => { if (cell === 'X') dots.push([left + x, top + y]); }));
+  haloDots(dots);
+  drawDots(dots, ANGER_RED);
+}
+/* ---------- 電車（ときどき となりの線路を通る。ゲームの判定には関係ない）---------- */
+const TRAIN = { speed: 15, car: 6.4, gap: .35, cars: 3, x0: -12.95, x1: -10.65, z0: -.75, z1: 3.15 };
+const TRAIN_LEN = TRAIN.cars * TRAIN.car + (TRAIN.cars - 1) * TRAIN.gap;
+const TRAIN_START = Y_MIN - 1.6;                                          // 先頭はトンネルの中から
+const TRAIN_TIME = (Y_MAX + .5 - TRAIN_START + TRAIN_LEN) / TRAIN.speed;  // 出てから最後尾が通りすぎるまで（秒）
+const idleTrain = { at: -99, next: 2.5 };                                 // 遊んでいないときの電車
+// 動くもの用の直方体：box() と同じ面の明るさで、ざらつき（ノイズ）を省いて速く描く
+function fbox(x0, y0, z0, x1, y1, z1, c) {
+  const ramp = rampOf(c), step = .07;
+  const put = (x, y, z, base) => {
+    const p = project(x, y, z), ix = p.sx | 0, iy = p.sy | 0;
+    if (ix < 0 || iy < 0 || ix >= W || iy >= H) return;
+    const i = iy * W + ix;
+    if (p.d <= zb[i]) return;
+    zb[i] = p.d;
+    pix[i] = ramp[clamp(Math.floor(base + (bayerAt(ix, iy) - .5) * .5), 0, 4)];
+  };
+  for (let a = x0; a <= x1; a += step) for (let b = y0; b <= y1; b += step) put(a, b, z1, 3.4);
+  for (let a = x0; a <= x1; a += step) for (let b = z0; b <= z1; b += step) put(a, y1, b, 2.3);
+  for (let a = y0; a <= y1; a += step) for (let b = z0; b <= z1; b += step) put(x1, a, b, 1.2);
+}
+function drawCar(ya, yb, lead, pant) {                    // 1両。ya：うしろ、yb：前。島の手前の切り口（Y_MAX）で切る
+  const y0 = Math.max(ya, Y_MIN - 2), y1 = Math.min(yb, Y_MAX);
+  if (y1 - y0 < .05) return;
+  const { x0, x1, z0, z1 } = TRAIN, xs = x1 + .03;
+  const span = (a, b, f) => { const p = Math.max(y0, ya + a), q = Math.min(y1, ya + b); if (q - p > .02) f(p, q); };
+  fbox(x0 + .2, y0, -1.02, x1 - .2, y1, z0, CAR_DARK);                  // 床下
+  fbox(x0, y0, z0, x1, y1, z1, CAR_BODY);
+  fbox(x0 + .15, y0, z1, x1 - .15, y1, z1 + .28, CAR_ROOF);
+  fbox(x1, y0, .5, xs, y1, .82, CAR_STRIPE);                             // 緑の帯
+  for (const [a, b] of [[.3, 1], [2.3, 3], [3.4, 4.1], [5.4, 6.1]]) span(a, b, (p, q) => fbox(x1, p, 1.3, xs, q, 2.35, CAR_WINDOW));
+  for (const [a, b] of [[1.15, 2.1], [4.25, 5.2]]) span(a, b, (p, q) => {   // ドア（窓つき）
+    fbox(x1, p, -.55, x1 + .02, q, 2.5, CAR_DOOR);
+    fbox(x1 + .02, p + .12, 1.35, xs + .01, q - .12, 2.3, CAR_WINDOW);
+  });
+  if (lead && yb <= Y_MAX) {                                              // 先頭の顔：窓・行き先・ライト
+    fbox(x0 + .3, yb, 1.35, x1 - .3, yb + .03, 2.45, CAR_WINDOW);
+    fbox(x0 + .75, yb, 2.62, x1 - .75, yb + .03, 2.92, DEST);
+    sphere(x0 + .45, yb + .08, .3, .16, HEADLIGHT, 'solid'); sphere(x1 - .45, yb + .08, .3, .16, HEADLIGHT, 'solid');
+  }
+  const mid = (ya + yb) / 2;
+  if (pant && mid > y0 && mid < y1) {                                     // パンタグラフ（架線に触れる）
+    for (const s of [-.6, .6]) capsule([-11.8, mid + s, z1 + .28], [-11.8, mid, 4.92], .05, .05, () => POLE, 'solid');
+  }
+  for (let y = y0 + .3; y < y1; y += .6) { castShadow(-11.8, y, 1.5, 1.2, 1, .3); castShadow(-11.8, y, 2.9, 1, 1, .3); }   // ホームに落ちる影
+}
+function drawTrain(dt) {
+  const front = TRAIN_START + dt * TRAIN.speed;
+  for (let k = 0; k < TRAIN.cars; k++) {
+    const yb = front - k * (TRAIN.car + TRAIN.gap);
+    drawCar(yb - TRAIN.car, yb, k === 0, k === 1);
+  }
+}
+function trainTime(t) {                                   // いま通っている電車の、出てからの秒数（いなければ -1）
+  if (G.phase === 'play') {
+    for (const t0 of G.trains) if (t >= t0 && t - t0 <= TRAIN_TIME) return t - t0;
+    return -1;
+  }
+  const d = G.time - idleTrain.at;
+  return d >= 0 && d <= TRAIN_TIME ? d : -1;
+}
+
+function draw(t) {
+  pix.set(bakedPix);
+  zb.set(bakedZ);
+  pendingShadows.length = 0;
+  drawGate(t);
+  drawPeople(t);
+  drawStaff(t);
+  const trainT = trainTime(t);
+  if (trainT >= 0) drawTrain(trainT);
+  const windT = STILL ? 0 : Math.floor(G.time * WIND_FPS) / WIND_FPS;
+  drawLeaves(windT);
+  drawTufts(windT);
+  flushShadows();
+  applyShadows(bakedZ);
+  shadeEdges();
+  // 紙ふぶき・ひらめき・キラーン（ドットで描く）
+  for (const q of G.parts) {
+    const d = t - q.t0;
+    if (d < 0 || d > q.life) continue;
+    const z = q.z + q.vz * d - 9 * d * d;
+    if (z < 0) continue;
+    const s = project(q.x + q.vx * d, q.y + q.vy * d, z);
+    drawDots(q.big ? [[s.sx, s.sy], [s.sx + 1, s.sy], [s.sx, s.sy + 1], [s.sx + 1, s.sy + 1]] : [[s.sx, s.sy], [s.sx + 1, s.sy]], q.color);
+  }
+  for (const q of G.sparks) {
+    const d = t - q.t0;
+    if (d < 0 || d > .16) continue;
+    const s = project(q.x, q.y, q.z), r = 4 + d * 60, ring = [];
+    for (let a = 0; a < 16; a++) ring.push([s.sx + Math.cos(a * Math.PI / 8) * r, s.sy + Math.sin(a * Math.PI / 8) * r * .8]);
+    haloDots(ring); drawDots(ring, SIGNAL);
+  }
+  for (const q of G.stars) {
+    const d = t - q.t0;
+    if (d < 0 || d > .4) continue;
+    const s = project(-8, -13, 18), r = Math.round(2 + Math.sin(Math.PI * d / .4) * 4), dots = [[s.sx, Math.max(4, s.sy)]];
+    for (let k = 1; k <= r; k++) dots.push([s.sx - k, Math.max(4, s.sy)], [s.sx + k, Math.max(4, s.sy)], [s.sx, Math.max(4, s.sy) - k], [s.sx, Math.max(4, s.sy) + k]);
+    haloDots(dots); drawDots(dots, SIGNAL);
+  }
+  // うっかり殴られたお客さんの頭に 怒りマーク 💢
+  for (const c of G.customers) {
+    if (c.stepAt > t) break;
+    const d = t - c.oopsAt;
+    if (!c.oops || d < 0 || d > .9) continue;
+    const leave = leaveTime(c), dt = Math.max(0, t - leave);
+    const s = t < leave ? project(0, 0, 2.95) : project(c.dir * .5 * dt, 7.4 * dt, 2.95);
+    drawAnger(s.sx + 6, s.sy - 4, d);
+  }
+  // ニセ客の頭の上に 矢印（ここを叩く）
+  for (const c of G.customers) {
+    if (c.stepAt > t) break;
+    if (!c.fake || c.result || t < c.stepAt) continue;
+    const s = project(0, 0, 3.15);
+    drawArrow(s.sx, s.sy, G.time);
+  }
+  let dx = 0, dy = 0;
+  if (G.shake && t >= G.shake.t0 && t - G.shake.t0 < .18) {
+    const k = Math.round(G.shake.amp * (1 - (t - G.shake.t0) / .18));
+    dx = Math.floor((t - G.shake.t0) * 60) % 2 ? k : -k; dy = Math.floor((t - G.shake.t0) * 45) % 2 ? 1 : -1;
+  }
+  if (dx || dy) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H); }
+  ctx.putImageData(image, dx, dy);
+}
+
+/* ---------- 音（Web Audio でその場で合成）---------- */
+let audio = null, master = null, muted = false, hissBuf = null;
+function ensureAudio() {
+  if (audio) { if (audio.state !== 'running') audio.resume(); return; }
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return;
+  audio = new AC({ latencyHint: 'interactive' });
+  master = audio.createGain(); master.gain.value = muted ? 0 : .8;
+  const comp = audio.createDynamicsCompressor();
+  master.connect(comp).connect(audio.destination);
+  hissBuf = audio.createBuffer(1, audio.sampleRate, audio.sampleRate);
+  const d = hissBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  if (audio.state !== 'running') audio.resume();   // ブラウザによっては止まった状態で生まれる
+}
+function tone(type, f, at, dur, vol, to) {
+  const o = audio.createOscillator(), g = audio.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, at);
+  if (to) o.frequency.exponentialRampToValueAtTime(to, at + dur * .7);
+  g.gain.setValueAtTime(.0001, at); g.gain.exponentialRampToValueAtTime(vol, at + .004); g.gain.exponentialRampToValueAtTime(.0001, at + dur);
+  o.connect(g).connect(master); o.start(at); o.stop(at + dur + .02);
+}
+function hiss(at, dur, vol, type, freq, to) {
+  const s = audio.createBufferSource(), f = audio.createBiquadFilter(), g = audio.createGain();
+  s.buffer = hissBuf; f.type = type; f.frequency.setValueAtTime(freq, at);
+  if (to) f.frequency.exponentialRampToValueAtTime(to, at + dur);
+  g.gain.setValueAtTime(.0001, at); g.gain.exponentialRampToValueAtTime(vol, at + .003); g.gain.exponentialRampToValueAtTime(.0001, at + dur);
+  s.connect(f).connect(g).connect(master); s.start(at, Math.random() * .5); s.stop(at + dur + .02);
+}
+const chime = (at, f, dur) => { tone('sine', f, at, dur, .3); tone('sine', f * 2, at, dur * .5, .04); };
+function rumble(at, dur, vol) {                         // ゴーッ：だんだん近づいて 遠ざかる
+  const s = audio.createBufferSource(), f = audio.createBiquadFilter(), g = audio.createGain();
+  s.buffer = hissBuf; s.loop = true; f.type = 'lowpass'; f.frequency.value = 320;
+  g.gain.setValueAtTime(.0001, at); g.gain.exponentialRampToValueAtTime(vol, at + dur * .45); g.gain.exponentialRampToValueAtTime(.0001, at + dur);
+  s.connect(f).connect(g).connect(master); s.start(at); s.stop(at + dur + .05);
+}
+const SND = {
+  train: at => {
+    rumble(at, TRAIN_TIME, .07);
+    for (let j = 0; j < 6; j++) { const a = at + .5 + j * .42; hiss(a, .07, .08, 'lowpass', 420); hiss(a + .11, .07, .06, 'lowpass', 360); }   // ガタン、ゴトン
+  },
+  kick: at => tone('sine', 150, at, .3, .5, 42),
+  snare: at => { hiss(at, .14, .2, 'bandpass', 2200); tone('triangle', 190, at, .08, .12, 150); },
+  hat: (at, v = 1) => hiss(at, .03, .07 * v, 'highpass', 8000),
+  ohat: at => hiss(at, .18, .06, 'highpass', 7000),
+  stick: at => { tone('square', 1900, at, .03, .06); tone('sine', 980, at, .06, .14); },
+  bass: (at, f, d = .18) => { tone('square', f, at, d, .05); tone('sine', f, at, d, .13); },
+  stab: (at, notes) => notes.forEach(f => tone('square', f, at, .1, .02)),
+  bell: (at, f, d = .3) => { tone('sine', f, at, d, .07); tone('sine', f * 2, at, d * .6, .02); },
+  step: at => hiss(at, .05, .07, 'lowpass', 900),
+  ping: at => chime(at, 1318.5, .3),
+  pong: at => chime(at, 1046.5, .5),
+  ic: at => tone('square', 2090, at, .06, .04),
+  whoosh: at => hiss(at, .15, .16, 'bandpass', 600, 2400),
+  oops: at => { hiss(at, .08, .25, 'lowpass', 600); tone('triangle', 520, at + .02, .3, .1, 260); },
+  sneak: at => tone('sine', 300, at, .26, .14, 900),
+  blast: (at, perfect) => {
+    tone('sine', 115, at, .26, .8, 38); hiss(at, .22, .5, 'lowpass', 2600, 300); hiss(at, .05, .3, 'highpass', 3000);
+    tone('sine', 1500, at + .07, .7, .07, 480);
+    [2093, 2637, 3136, 4186].forEach((f, i) => tone('sine', f, at + .8 + i * .045, .25, .05));
+    if (perfect) [2093, 2637, 3136].forEach((f, i) => tone('sine', f, at + .04 + i * .04, .2, .05));
+  },
+};
+function musicStep(n, at) {
+  const bar = Math.floor(n / 16), step = n % 16, style = STYLE[bar], [root, notes] = CHORDS[(bar - 1 + 4) % 4];
+  const on = step % 4 === 0, off = step % 4 === 2, big = style === 'C' || style === 'D';
+  if (style === 'count') { if (on) SND.stick(at); return; }
+  if (style === 'end') {
+    if (step === 0) { SND.kick(at); [261.63, 329.63, 392, 523.25].forEach(f => tone('triangle', f, at, 1.6, .04)); SND.bass(at, 65.41, 1.2); }
+    return;
+  }
+  if (big ? on : step === 0 || step === 8) SND.kick(at);
+  if (step === 4 || step === 12) SND.snare(at);
+  if (big && off) SND.ohat(at); else if (step % 2 === 0) SND.hat(at, off ? 1 : .5);
+  if (off) SND.stab(at, notes);
+  const bass = big ? (step % 2 === 0 ? (step % 4 ? root * 2 : root) : 0) : (step === 0 || step === 6 || step === 12 ? root : step === 8 ? root * 1.5 : 0);
+  if (bass) SND.bass(at, bass);
+  if (style !== 'A' && step % 2 === 0) { const f = MELODY[(bar - 1 + 4) % 4][step / 2]; if (f && (big || on)) SND.bell(at, f); }
+}
+function schedule() {
+  if (!audio || G.phase !== 'play') return;
+  const nowA = audio.currentTime - G.startAt, horizon = nowA + LOOKAHEAD;
+  while (G.musicStep < CHART.length * 16 && G.musicStep * STEP16 < horizon) {
+    const n = G.musicStep++, at = n * STEP16;
+    if (at >= nowA - .05 && !muted) musicStep(n, G.startAt + at);
+  }
+  while (G.cueIdx < G.cues.length && G.cues[G.cueIdx].at < horizon) {
+    const q = G.cues[G.cueIdx++];
+    if (q.at >= nowA - .05 && !muted) SND[q.type === 'pass' ? 'ic' : q.type](G.startAt + q.at);
+  }
+}
+function sfx(name, gameT, ...args) {
+  if (!audio || muted || G.phase !== 'play') return;
+  SND[name](Math.max(audio.currentTime + .002, G.startAt + gameT), ...args);
+}
+
+/* ---------- 進行 ---------- */
+function gameTime() { return audio ? audio.currentTime - G.startAt - G.lag : 0; }
+function start() {
+  ensureAudio();
+  if (!audio) return;
+  resetGame();
+  G.lag = clamp((audio.baseLatency || 0) + (audio.outputLatency || 0), 0, .25);
+  G.startAt = audio.currentTime + .35;
+  G.phase = 'play';
+  renderHud();
+  setStatus('');
+}
+function finish() {
+  G.phase = 'over';
+  const score = G.score / (SCORE.perfect * G.fakes);       // 点数 ÷ 満点（全員ドカーン）
+  const rank = score >= .8 ? '駅長賞' : score >= .5 ? '一人前' : '研修中';
+  setStatus(`${G.score}点（撃退 ${G.blasted}/${G.fakes}・すりぬけ ${G.sneaks}・うっかり ${G.oops}）── ${rank}！ タップでもう一回`, true);
+}
+function tap() {
+  ensureAudio();   // 止まっていた音の時計を、押すたびに起こす
+  if (G.phase === 'play') hit(gameTime());
+  else start();
+}
+canvas.addEventListener('pointerdown', () => { canvas.focus({ preventScroll: true }); tap(); });
+// iPhone の Safari などは pointerdown では音を始められないので、click と touchend でも起こす
+const wakeAudio = () => { if (audio && audio.state !== 'running') audio.resume(); };
+addEventListener('click', wakeAudio);
+addEventListener('touchend', wakeAudio, { passive: true });
+addEventListener('keydown', e => {
+  if (document.querySelector('dialog[open]')) return;
+  if (![' ', 'Enter', 'j', 'f', 'J', 'F'].includes(e.key)) return;
+  if (e.target instanceof HTMLButtonElement) return;
+  e.preventDefault();
+  if (!e.repeat) tap();
+});
+const muteButton = document.getElementById('mute');
+muteButton.addEventListener('click', () => {
+  muted = !muted;
+  if (master) master.gain.value = muted ? 0 : .8;
+  muteButton.textContent = muted ? 'sound off' : 'sound on';
+  muteButton.setAttribute('aria-pressed', String(muted));
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && audio && G.phase === 'play') audio.suspend(); else if (audio) audio.resume(); });
+
+addEventListener('resize', fit);
+fit();
+bake();
+resetGame();
+setStatus('タップかスペースで 改札オープン');
+window.__hold = false;   // テスト用：true の間は自動で描かない
+function frame(now) {
+  if (window.__hold) { requestAnimationFrame(frame); return; }
+  G.time = now / 1000;
+  if (G.phase !== 'play' && G.time >= idleTrain.next) { idleTrain.at = G.time; idleTrain.next = G.time + TRAIN_TIME + 6 + Math.random() * 6; }
+  let t = -1;
+  if (G.phase === 'play') {
+    t = gameTime();
+    schedule();
+    judgeMisses(t);
+    if (t < BAR) setStatus(['3', '2', '1', 'スタート！'][clamp(Math.floor(t / BEAT), 0, 3)], true);
+    else if (G.status && t > popUntil && nodes.status.classList.contains('hot')) setStatus('');
+    renderHud();
+    if (t > TOTAL) { finish(); t = TOTAL; }
+  } else if (G.phase === 'over') t = TOTAL;
+  draw(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+setInterval(schedule, 25);
+window.__gate = { G, hit, gameTime, draw, start };
+</script>
+</body>
+</html>
